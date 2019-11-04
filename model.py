@@ -20,11 +20,12 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data
 from torch.autograd import Variable
+import torchvision
 
 import utils
 import visualize
-from nms.nms_wrapper import nms
-from roialign.roi_align.crop_and_resize import CropAndResizeFunction
+# from nms.nms_wrapper import nms
+# from roialign.roi_align.crop_and_resize import CropAndResizeFunction
 
 
 ############################################################
@@ -58,7 +59,7 @@ def printProgressBar (iteration, total, prefix = '', suffix = '', decimals = 1, 
     percent = ("{0:." + str(decimals) + "f}").format(100 * (iteration / float(total)))
     filledLength = int(length * iteration // total)
     bar = fill * filledLength + '-' * (length - filledLength)
-    print('\r%s |%s| %s%% %s' % (prefix, bar, percent, suffix), end = '\n')
+    print('\r%s |%s| %s%% %s' % (prefix, bar, percent, suffix), end='\n', flush=True)
     # Print New Line on Complete
     if iteration == total:
         print()
@@ -73,7 +74,8 @@ def unique1d(tensor):
         return tensor
     tensor = tensor.sort()[0]
     unique_bool = tensor[1:] != tensor [:-1]
-    first_element = Variable(torch.ByteTensor([True]), requires_grad=False)
+    # first_element = Variable(torch.ByteTensor([True]), requires_grad=False)
+    first_element = torch.BoolTensor([True])
     if tensor.is_cuda:
         first_element = first_element.cuda()
     unique_bool = torch.cat((first_element, unique_bool),dim=0)
@@ -380,7 +382,11 @@ def proposal_layer(inputs, proposal_count, nms_threshold, anchors, config=None):
     # for small objects, so we're skipping it.
 
     # Non-max suppression
-    keep = nms(torch.cat((boxes, scores.unsqueeze(1)), 1).data, nms_threshold)
+    # keep = nms(torch.cat((boxes, scores.unsqueeze(1)), 1).data, nms_threshold)
+    keep = torchvision.ops.nms(
+        boxes[:, [1, 0, 3, 2]].data, # from (y1,x1,y2,x2) to (x1,y1,x2,y2)
+        scores.data,
+        config.RPN_NMS_THRESHOLD)
     keep = keep[:proposal_count]
     boxes = boxes[keep, :]
 
@@ -471,11 +477,18 @@ def pyramid_roi_align(inputs, pool_size, image_shape):
         # Here we use the simplified approach of a single value per bin,
         # which is how it's done in tf.crop_and_resize()
         # Result: [batch * num_boxes, pool_height, pool_width, channels]
-        ind = Variable(torch.zeros(level_boxes.size()[0]),requires_grad=False).int()
-        if level_boxes.is_cuda:
-            ind = ind.cuda()
-        feature_maps[i] = feature_maps[i].unsqueeze(0)  #CropAndResizeFunction needs batch dimension
-        pooled_features = CropAndResizeFunction(pool_size, pool_size, 0)(feature_maps[i], level_boxes, ind)
+        # ind = Variable(torch.zeros(level_boxes.size()[0]),requires_grad=False).int()
+        # if level_boxes.is_cuda:
+        #     ind = ind.cuda()
+        # feature_maps[i] = feature_maps[i].unsqueeze(0)  #CropAndResizeFunction needs batch dimension
+        # pooled_features = CropAndResizeFunction(pool_size, pool_size, 0)(feature_maps[i], level_boxes, ind)
+
+        #CropAndResizeFunction needs batch dimension
+        feature_maps[i] = feature_maps[i].unsqueeze(0)
+        pooled_features = torchvision.ops.roi_align(
+            feature_maps[i],
+            [level_boxes[:, [1, 0, 3, 2]]], (pool_size, pool_size))
+
         pooled.append(pooled_features)
 
     # Pack pooled features into one tensor
@@ -565,7 +578,7 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
     # Handle COCO crowds
     # A crowd box in COCO is a bounding box around several instances. Exclude
     # them from training. A crowd box is given a negative class ID.
-    if torch.nonzero(gt_class_ids < 0).size():
+    if torch.nonzero(gt_class_ids < 0).size(0) > 0:
         crowd_ix = torch.nonzero(gt_class_ids < 0)[:, 0]
         non_crowd_ix = torch.nonzero(gt_class_ids > 0)[:, 0]
         crowd_boxes = gt_boxes[crowd_ix.data, :]
@@ -579,7 +592,8 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
         crowd_iou_max = torch.max(crowd_overlaps, dim=1)[0]
         no_crowd_bool = crowd_iou_max < 0.001
     else:
-        no_crowd_bool =  Variable(torch.ByteTensor(proposals.size()[0]*[True]), requires_grad=False)
+        # no_crowd_bool = Variable(torch.ByteTensor(proposals.size()[0]*[True]), requires_grad=False)
+        no_crowd_bool = torch.BoolTensor(proposals.size()[0]*[True])
         if config.GPU_COUNT:
             no_crowd_bool = no_crowd_bool.cuda()
 
@@ -594,7 +608,7 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
 
     # Subsample ROIs. Aim for 33% positive
     # Positive ROIs
-    if torch.nonzero(positive_roi_bool).size():
+    if torch.nonzero(positive_roi_bool).size(0) > 0:
         positive_indices = torch.nonzero(positive_roi_bool)[:, 0]
 
         positive_count = int(config.TRAIN_ROIS_PER_IMAGE *
@@ -637,10 +651,12 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
             y2 = (y2 - gt_y1) / gt_h
             x2 = (x2 - gt_x1) / gt_w
             boxes = torch.cat([y1, x1, y2, x2], dim=1)
-        box_ids = Variable(torch.arange(roi_masks.size()[0]), requires_grad=False).int()
-        if config.GPU_COUNT:
-            box_ids = box_ids.cuda()
-        masks = Variable(CropAndResizeFunction(config.MASK_SHAPE[0], config.MASK_SHAPE[1], 0)(roi_masks.unsqueeze(1), boxes, box_ids).data, requires_grad=False)
+        # box_ids = Variable(torch.arange(roi_masks.size()[0]), requires_grad=False).int()
+        # if config.GPU_COUNT:
+        #     box_ids = box_ids.cuda()
+        # masks = Variable(CropAndResizeFunction(config.MASK_SHAPE[0], config.MASK_SHAPE[1], 0)(roi_masks.unsqueeze(1), boxes, box_ids).data, requires_grad=False)
+        masks = Variable(torchvision.ops.roi_align(
+            roi_masks.unsqueeze(1), [boxes[:, [1, 0, 3, 2]]], (config.MASK_SHAPE[0], config.MASK_SHAPE[1])), requires_grad=False)
         masks = masks.squeeze(1)
 
         # Threshold mask pixels at 0.5 to have GT masks be 0 or 1 to use with
@@ -800,7 +816,11 @@ def refine_detections(rois, probs, deltas, window, config):
         ix_scores, order = ix_scores.sort(descending=True)
         ix_rois = ix_rois[order.data,:]
 
-        class_keep = nms(torch.cat((ix_rois, ix_scores.unsqueeze(1)), dim=1).data, config.DETECTION_NMS_THRESHOLD)
+        # class_keep = nms(torch.cat((ix_rois, ix_scores.unsqueeze(1)), dim=1).data, config.DETECTION_NMS_THRESHOLD)
+        class_keep = torchvision.ops.nms(
+            ix_rois.data,
+            ix_scores.data,
+            config.DETECTION_NMS_THRESHOLD)
 
         # Map indicies
         class_keep = keep[ixs[order[class_keep].data].data]
@@ -1053,7 +1073,7 @@ def compute_mrcnn_class_loss(target_class_ids, pred_class_logits):
     """
 
     # Loss
-    if target_class_ids.size():
+    if target_class_ids.size(0) > 0:
         loss = F.cross_entropy(pred_class_logits,target_class_ids.long())
     else:
         loss = Variable(torch.FloatTensor([0]), requires_grad=False)
@@ -1071,7 +1091,7 @@ def compute_mrcnn_bbox_loss(target_bbox, target_class_ids, pred_bbox):
     pred_bbox: [batch, num_rois, num_classes, (dy, dx, log(dh), log(dw))]
     """
 
-    if target_class_ids.size():
+    if target_class_ids.size(0) > 0:
         # Only positive ROIs contribute to the loss. And only
         # the right class_id of each ROI. Get their indicies.
         positive_roi_ix = torch.nonzero(target_class_ids > 0)[:, 0]
@@ -1101,7 +1121,7 @@ def compute_mrcnn_mask_loss(target_masks, target_class_ids, pred_masks):
     pred_masks: [batch, proposals, height, width, num_classes] float32 tensor
                 with values from 0 to 1.
     """
-    if target_class_ids.size():
+    if target_class_ids.size(0) > 0:
         # Only positive ROIs contribute to the loss. And only
         # the class specific mask of each ROI.
         positive_ix = torch.nonzero(target_class_ids > 0)[:, 0]
@@ -1471,7 +1491,7 @@ class MaskRCNN(nn.Module):
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.xavier_uniform(m.weight)
+                nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     m.bias.data.zero_()
             elif isinstance(m, nn.BatchNorm2d):
@@ -1713,7 +1733,7 @@ class MaskRCNN(nn.Module):
             rois, target_class_ids, target_deltas, target_mask = \
                 detection_target_layer(rpn_rois, gt_class_ids, gt_boxes, gt_masks, self.config)
 
-            if not rois.size():
+            if not rois.size(0) > 0:
                 mrcnn_class_logits = Variable(torch.FloatTensor())
                 mrcnn_class = Variable(torch.IntTensor())
                 mrcnn_bbox = Variable(torch.FloatTensor())
@@ -1867,19 +1887,43 @@ class MaskRCNN(nn.Module):
                 batch_count = 0
 
             # Progress
-            printProgressBar(step + 1, steps, prefix="\t{}/{}".format(step + 1, steps),
-                             suffix="Complete - loss: {:.5f} - rpn_class_loss: {:.5f} - rpn_bbox_loss: {:.5f} - mrcnn_class_loss: {:.5f} - mrcnn_bbox_loss: {:.5f} - mrcnn_mask_loss: {:.5f}".format(
-                                 loss.data.cpu()[0], rpn_class_loss.data.cpu()[0], rpn_bbox_loss.data.cpu()[0],
-                                 mrcnn_class_loss.data.cpu()[0], mrcnn_bbox_loss.data.cpu()[0],
-                                 mrcnn_mask_loss.data.cpu()[0]), length=10)
+            # printProgressBar(step + 1, steps, prefix="\t{}/{}".format(step + 1, steps),
+            #                  suffix="Complete - loss: {:.5f} - rpn_class_loss: {:.5f} - rpn_bbox_loss: {:.5f} - mrcnn_class_loss: {:.5f} - mrcnn_bbox_loss: {:.5f} - mrcnn_mask_loss: {:.5f}".format(
+            #                      loss.data.cpu()[0], rpn_class_loss.data.cpu()[0], rpn_bbox_loss.data.cpu()[0],
+            #                      mrcnn_class_loss.data.cpu()[0], mrcnn_bbox_loss.data.cpu()[0],
+            #                      mrcnn_mask_loss.data.cpu()[0]), length=10)
+
+            suffix_text = ("Complete - loss: {:.5f}"
+                           " - rpn_class_loss: {:.5f}"
+                           " - rpn_bbox_loss: {:.5f}"
+                           " - mrcnn_class_loss: {:.5f}"
+                           " - mrcnn_bbox_loss: {:.5f}")
+            printProgressBar(
+                step + 1,
+                steps,
+                prefix="\t{}/{}".format(step + 1, steps),
+                suffix=suffix_text.format(
+                    float(loss.data.cpu()),
+                    float(rpn_class_loss.data.cpu()),
+                    float(rpn_bbox_loss.data.cpu()),
+                    float(mrcnn_class_loss.data.cpu()),
+                    float(mrcnn_bbox_loss.data.cpu()),
+                    float(mrcnn_mask_loss.data.cpu())),
+                length=10)
 
             # Statistics
-            loss_sum += loss.data.cpu()[0]/steps
-            loss_rpn_class_sum += rpn_class_loss.data.cpu()[0]/steps
-            loss_rpn_bbox_sum += rpn_bbox_loss.data.cpu()[0]/steps
-            loss_mrcnn_class_sum += mrcnn_class_loss.data.cpu()[0]/steps
-            loss_mrcnn_bbox_sum += mrcnn_bbox_loss.data.cpu()[0]/steps
-            loss_mrcnn_mask_sum += mrcnn_mask_loss.data.cpu()[0]/steps
+            # loss_sum += loss.data.cpu()[0]/steps
+            # loss_rpn_class_sum += rpn_class_loss.data.cpu()[0]/steps
+            # loss_rpn_bbox_sum += rpn_bbox_loss.data.cpu()[0]/steps
+            # loss_mrcnn_class_sum += mrcnn_class_loss.data.cpu()[0]/steps
+            # loss_mrcnn_bbox_sum += mrcnn_bbox_loss.data.cpu()[0]/steps
+            # loss_mrcnn_mask_sum += mrcnn_mask_loss.data.cpu()[0]/steps
+            loss_sum += float(loss.data.cpu()) /steps
+            loss_rpn_class_sum += float(rpn_class_loss.data.cpu()) / steps
+            loss_rpn_bbox_sum += float(rpn_bbox_loss.data.cpu()) / steps
+            loss_mrcnn_class_sum += float(mrcnn_class_loss.data.cpu()) / steps
+            loss_mrcnn_bbox_sum += float(mrcnn_bbox_loss.data.cpu()) / steps
+            loss_mrcnn_mask_sum += float(mrcnn_mask_loss.data.cpu()) / steps
 
             # Break after 'steps' steps
             if step==steps-1:
@@ -1931,7 +1975,7 @@ class MaskRCNN(nn.Module):
             rpn_class_logits, rpn_pred_bbox, target_class_ids, mrcnn_class_logits, target_deltas, mrcnn_bbox, target_mask, mrcnn_mask = \
                 self.predict([images, image_metas, gt_class_ids, gt_boxes, gt_masks], mode='training')
 
-            if not target_class_ids.size():
+            if not target_class_ids.size(0) > 0:
                 continue
 
             # Compute losses
@@ -1939,19 +1983,42 @@ class MaskRCNN(nn.Module):
             loss = rpn_class_loss + rpn_bbox_loss + mrcnn_class_loss + mrcnn_bbox_loss + mrcnn_mask_loss
 
             # Progress
-            printProgressBar(step + 1, steps, prefix="\t{}/{}".format(step + 1, steps),
-                             suffix="Complete - loss: {:.5f} - rpn_class_loss: {:.5f} - rpn_bbox_loss: {:.5f} - mrcnn_class_loss: {:.5f} - mrcnn_bbox_loss: {:.5f} - mrcnn_mask_loss: {:.5f}".format(
-                                 loss.data.cpu()[0], rpn_class_loss.data.cpu()[0], rpn_bbox_loss.data.cpu()[0],
-                                 mrcnn_class_loss.data.cpu()[0], mrcnn_bbox_loss.data.cpu()[0],
-                                 mrcnn_mask_loss.data.cpu()[0]), length=10)
+            # printProgressBar(step + 1, steps, prefix="\t{}/{}".format(step + 1, steps),
+            #                  suffix="Complete - loss: {:.5f} - rpn_class_loss: {:.5f} - rpn_bbox_loss: {:.5f} - mrcnn_class_loss: {:.5f} - mrcnn_bbox_loss: {:.5f} - mrcnn_mask_loss: {:.5f}".format(
+            #                      loss.data.cpu()[0], rpn_class_loss.data.cpu()[0], rpn_bbox_loss.data.cpu()[0],
+            #                      mrcnn_class_loss.data.cpu()[0], mrcnn_bbox_loss.data.cpu()[0],
+            #                      mrcnn_mask_loss.data.cpu()[0]), length=10)
+            suffix_text = ("Complete - loss: {:.5f}"
+                           " - rpn_class_loss: {:.5f}"
+                           " - rpn_bbox_loss: {:.5f}"
+                           " - mrcnn_class_loss: {:.5f}"
+                           " - mrcnn_bbox_loss: {:.5f}")
+            printProgressBar(
+                step + 1,
+                steps,
+                prefix="\t{}/{}".format(step + 1, steps),
+                suffix=suffix_text.format(
+                    float(loss.data.cpu()),
+                    float(rpn_class_loss.data.cpu()),
+                    float(rpn_bbox_loss.data.cpu()),
+                    float(mrcnn_class_loss.data.cpu()),
+                    float(mrcnn_bbox_loss.data.cpu()),
+                    float(mrcnn_mask_loss.data.cpu())),
+                length=10)
 
             # Statistics
-            loss_sum += loss.data.cpu()[0]/steps
-            loss_rpn_class_sum += rpn_class_loss.data.cpu()[0]/steps
-            loss_rpn_bbox_sum += rpn_bbox_loss.data.cpu()[0]/steps
-            loss_mrcnn_class_sum += mrcnn_class_loss.data.cpu()[0]/steps
-            loss_mrcnn_bbox_sum += mrcnn_bbox_loss.data.cpu()[0]/steps
-            loss_mrcnn_mask_sum += mrcnn_mask_loss.data.cpu()[0]/steps
+            # loss_sum += loss.data.cpu()[0]/steps
+            # loss_rpn_class_sum += rpn_class_loss.data.cpu()[0]/steps
+            # loss_rpn_bbox_sum += rpn_bbox_loss.data.cpu()[0]/steps
+            # loss_mrcnn_class_sum += mrcnn_class_loss.data.cpu()[0]/steps
+            # loss_mrcnn_bbox_sum += mrcnn_bbox_loss.data.cpu()[0]/steps
+            # loss_mrcnn_mask_sum += mrcnn_mask_loss.data.cpu()[0]/steps
+            loss_sum += float(loss.data.cpu()) /steps
+            loss_rpn_class_sum += float(rpn_class_loss.data.cpu()) / steps
+            loss_rpn_bbox_sum += float(rpn_bbox_loss.data.cpu()) / steps
+            loss_mrcnn_class_sum += float(mrcnn_class_loss.data.cpu()) / steps
+            loss_mrcnn_bbox_sum += float(mrcnn_bbox_loss.data.cpu()) / steps
+            loss_mrcnn_mask_sum += float(mrcnn_mask_loss.data.cpu()) / steps
 
             # Break after 'steps' steps
             if step==steps-1:
