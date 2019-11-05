@@ -307,7 +307,7 @@ def resize_image(image, min_dim=None, max_dim=None, padding=False):
         # image = scipy.misc.imresize(
         #     image, (round(h * scale), round(w * scale)))
         image = np.array(Image.fromarray(image).resize(
-            (round(h * scale), round(w * scale))))
+            (round(w * scale), round(h * scale))))
     # Need padding?
     if padding:
         # Get new height and width
