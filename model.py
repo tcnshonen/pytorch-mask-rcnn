@@ -544,7 +544,7 @@ def bbox_overlaps(boxes1, boxes2):
 
     return overlaps
 
-def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
+def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, scale, config):
     """Subsamples proposals and generates target box refinment, class_ids,
     and masks for each.
 
@@ -555,6 +555,7 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
     gt_boxes: [batch, MAX_GT_INSTANCES, (y1, x1, y2, x2)] in normalized
               coordinates.
     gt_masks: [batch, height, width, MAX_GT_INSTANCES] of boolean type
+    scale: [4] height and width
 
     Returns: Target ROIs and corresponding class IDs, bounding box shifts,
     and masks.
@@ -655,8 +656,16 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
         # if config.GPU_COUNT:
         #     box_ids = box_ids.cuda()
         # masks = Variable(CropAndResizeFunction(config.MASK_SHAPE[0], config.MASK_SHAPE[1], 0)(roi_masks.unsqueeze(1), boxes, box_ids).data, requires_grad=False)
-        masks = Variable(torchvision.ops.roi_align(
-            roi_masks.unsqueeze(1), [boxes[:, [1, 0, 3, 2]]], (config.MASK_SHAPE[0], config.MASK_SHAPE[1])), requires_grad=False)
+        # masks = Variable(torchvision.ops.roi_align(
+        #     roi_masks.unsqueeze(1), [boxes[:, [1, 0, 3, 2]]], (config.MASK_SHAPE[0], config.MASK_SHAPE[1])), requires_grad=False)
+        box_list = []
+        for box in boxes:
+            box_list.append((box * scale)[[1, 0, 3, 2]].unsqueeze(0))
+        masks = torchvision.ops.roi_align(
+            roi_masks.unsqueeze(1),
+            box_list,
+            (config.MASK_SHAPE[0],
+            config.MASK_SHAPE[1])).detach()
         masks = masks.squeeze(1)
 
         # Threshold mask pixels at 0.5 to have GT masks be 0 or 1 to use with
@@ -1612,7 +1621,7 @@ class MaskRCNN(nn.Module):
             molded_images = molded_images.cuda()
 
         # Wrap in variable
-        molded_images = Variable(molded_images, volatile=True)
+        # molded_images = Variable(molded_images, volatile=True)
 
         # Run object detection
         detections, mrcnn_mask = self.predict([molded_images, image_metas], mode='inference')
@@ -1731,7 +1740,7 @@ class MaskRCNN(nn.Module):
             # Note that proposal class IDs, gt_boxes, and gt_masks are zero
             # padded. Equally, returned rois and targets are zero padded.
             rois, target_class_ids, target_deltas, target_mask = \
-                detection_target_layer(rpn_rois, gt_class_ids, gt_boxes, gt_masks, self.config)
+                detection_target_layer(rpn_rois, gt_class_ids, gt_boxes, gt_masks, scale, self.config)
 
             if not rois.size(0) > 0:
                 mrcnn_class_logits = Variable(torch.FloatTensor())
